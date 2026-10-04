@@ -104,7 +104,7 @@ val tgCfWsSecret: String = run {
  * `NOVA_OPERA_RELAY_PASSWORD` остаётся аварийной подменой — но сборка с ней
  * перестаёт быть воспроизводимой, поэтому публиковать её нельзя.
  */
-val relayKeyId: String = "nova-android-160"
+val relayKeyId: String = "nova-android-161"
 val relayKeyToken: String = ""
 
 val operaRelayPassword: String = run {
@@ -165,8 +165,8 @@ android {
         // упаковывается (проверка ниже), а быстрая и диагностическая сборки идут с
         // прежним ключом, который сервер принимает. Провернуть ключ в обход сервера —
         // получить `407` у всех пользователей.
-        versionCode = 160
-        versionName = "1.32.5"
+        versionCode = 161
+        versionName = "1.32.6"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
 
