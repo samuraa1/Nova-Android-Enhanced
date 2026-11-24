@@ -377,6 +377,7 @@ class SettingsActivity : AppCompatActivity() {
         NovaRelay.attach(this)
 
         setContentView(R.layout.activity_settings)
+        EnhancedNetworkUi.bind(this)
 
         NovaFontHelper.apply(findViewById(android.R.id.content))
         appliedAppearanceSignature = appearanceSignature()
@@ -1820,7 +1821,7 @@ class SettingsActivity : AppCompatActivity() {
 
             exported.mapCatching { exportFile ->
 
-                val uri = FileProvider.getUriForFile(this@SettingsActivity, "com.brent.nova.provider", exportFile)
+                val uri = FileProvider.getUriForFile(this@SettingsActivity, "$packageName.provider", exportFile)
 
                 val shareIntent = Intent(Intent.ACTION_SEND).apply {
 

@@ -2485,6 +2485,7 @@ class NovaVpnService : OperaNativeVpnService() {
         val noticeBeforeChange = currentTransportNotice
         val clientData = ClientData(this)
         if (state == STATE_CONNECTED) {
+            connectedStateGeneration = connectGeneration.get()
             lastStoppedStateCleanupAtMs = 0L
             lastConnectedAtMs = SystemClock.elapsedRealtime()
             connectedHealthProbeFailures = 0
@@ -6139,6 +6140,9 @@ class NovaVpnService : OperaNativeVpnService() {
 
     private enum class AutoStepResult { ABORTED, FAILED, TIMEOUT }
 
+    @Volatile
+    private var connectedStateGeneration = -1
+
     private fun autoChainSkipReason(chip: String): String? = when (chip) {
         ConnectionSelectorPolicy.CHIP_NOVA -> when {
             !NovaProxyProcess.isAvailable(this) -> "нет движка списка на этом устройстве"
@@ -6149,53 +6153,61 @@ class NovaVpnService : OperaNativeVpnService() {
         else -> null
     }
 
-    /**
-     * «Авто»: режимы по очереди — Nova, WARP, MASQUE, Opera, Proton, Tor, DNS, на каждый не
-     * больше [AUTO_STEP_BUDGET_MS]. Каждый шаг — тот же путь, что у явно выбранной кнопки
-     * (`startSmartConnection` с её значением), поэтому в нём не подменяется транспорт;
-     * остановку, которой режим сдаётся, подавляет [autoChainHold], и очередь идёт дальше.
-     * Поток остаётся смотрителем сеанса: если режим сдался уже после подключения, берётся
-     * следующий. Всё исчерпано — обычная остановка вслух.
-     */
+    /** Auto schedules the existing single-transport phases and advances when a phase stops. */
     private fun runAutoChain(
         clientData: ClientData,
         diagnosticsMode: Boolean,
         aggressiveFastStart: Boolean,
         firstGeneration: Int,
     ) {
+        val store = SmartNetworkStore(this)
+        val manager = getSystemService(android.net.ConnectivityManager::class.java)
+        val network = selectUnderlyingNetwork(manager)
+        val condition = SmartNetworkStore.classify(network?.let { manager?.getNetworkCapabilities(it) })
+        val scope = SmartNetworkStore.scope(buildUnderlyingNetworkClass(manager, network), condition)
+        val mode = store.mode()
+        val attempts = SmartNetworkPolicy.plan(mode, condition, AUTO_CHAIN, store.lastSuccess(scope), System.currentTimeMillis())
+        LogManager.log("Auto network policy: ${mode.name}, ${condition.name}")
         autoChainHold = true
         var generation = firstGeneration
         var exhausted = false
         try {
-            for ((position, chip) in AUTO_CHAIN.withIndex()) {
+            for ((position, attempt) in attempts.withIndex()) {
                 if (isUserStopped || explicitStopRequested) return
-                if (position > 0) generation = beginConnectGeneration(stopExisting = true)
                 if (!isConnectGenerationCurrent(generation)) return
+                val chip = attempt.transport
                 val skip = autoChainSkipReason(chip)
                 if (skip != null) {
                     LogManager.log("Авто: ${chip.uppercase()} пропущен — $skip.")
                     continue
                 }
                 val region = ConnectionSelectorPolicy.storedValueForChip(chip, clientData.getOperaSubRegionPreference())
-                LogManager.log("Авто: шаг ${position + 1}/${AUTO_CHAIN.size} — ${chip.uppercase()}, не больше ${AUTO_STEP_BUDGET_MS / 1000} с.")
+                LogManager.log("Авто: шаг ${position + 1}/${attempts.size} — ${chip.uppercase()}, не больше ${attempt.budgetMs / 1000} с.")
                 autoStepFailed = false
                 isRunning = true
                 val stepGeneration = generation
-                val deadline = SystemClock.elapsedRealtime() + AUTO_STEP_BUDGET_MS
+                val deadline = SystemClock.elapsedRealtime() + attempt.budgetMs
+                val workerDeadline = System.currentTimeMillis() + attempt.budgetMs
                 val worker = startSafeServiceThread("NovaAuto-$chip") {
                     startSmartConnection(
                         regionPreferenceOverride = region,
                         diagnosticsMode = diagnosticsMode,
                         connectGenerationId = stepGeneration,
                         aggressiveFastStart = aggressiveFastStart,
-                        stepDeadlineAtMs = System.currentTimeMillis() + AUTO_STEP_BUDGET_MS,
+                        stepDeadlineAtMs = workerDeadline,
                     )
                 }
-                when (superviseAutoStep(stepGeneration, deadline, worker)) {
+                when (superviseAutoStep(stepGeneration, deadline, worker) {
+                    if (mode != SmartNetworkPolicy.Mode.CUSTOM && network == selectUnderlyingNetwork(manager)) {
+                        store.recordSuccess(scope, chip, System.currentTimeMillis())
+                    }
+                }) {
                     AutoStepResult.ABORTED -> return
                     AutoStepResult.FAILED -> LogManager.log("Авто: ${chip.uppercase()} не поднялся — следующий режим.")
-                    AutoStepResult.TIMEOUT -> LogManager.log("Авто: ${chip.uppercase()} не поднялся за ${AUTO_STEP_BUDGET_MS / 1000} с — следующий режим.")
+                    AutoStepResult.TIMEOUT -> LogManager.log("Авто: ${chip.uppercase()} не поднялся за ${attempt.budgetMs / 1000} с — следующий режим.")
                 }
+                if (isUserStopped || explicitStopRequested || !isConnectGenerationCurrent(stepGeneration)) return
+                generation = beginConnectGeneration(stopExisting = true)
                 runCatching { worker.join(8_000L) }
             }
             exhausted = true
@@ -6212,13 +6224,21 @@ class NovaVpnService : OperaNativeVpnService() {
     }
 
     /** Ждёт исхода шага; поднявшийся шаг остаётся под присмотром, пока сеанс жив. */
-    private fun superviseAutoStep(generation: Int, deadline: Long, worker: Thread): AutoStepResult {
+    private fun superviseAutoStep(
+        generation: Int,
+        deadline: Long,
+        worker: Thread,
+        onConnected: () -> Unit,
+    ): AutoStepResult {
         var connected = false
         var workerGoneAt = 0L
         while (true) {
             if (isUserStopped || explicitStopRequested || !isConnectGenerationCurrent(generation)) return AutoStepResult.ABORTED
             if (autoStepFailed) return AutoStepResult.FAILED
-            if (currentState == STATE_CONNECTED) connected = true
+            if (!connected && currentState == STATE_CONNECTED && connectedStateGeneration == generation) {
+                connected = true
+                onConnected()
+            }
             if (!connected) {
                 if (SystemClock.elapsedRealtime() > deadline) return AutoStepResult.TIMEOUT
                 // Нить режима кончилась, а подключения нет: даём короткую паузу на запоздавший
@@ -23925,16 +23945,19 @@ class NovaVpnService : OperaNativeVpnService() {
         ) {
             return cached.second
         }
-        val restricted = runCatching {
-            RestrictedMobileDetector.detect(connectivityManager, network, requireCellular = false)
-        }.getOrNull()
+        val caps = connectivityManager.getNetworkCapabilities(network)
+        val restricted = if (SmartNetworkStore.classify(caps) == SmartNetworkPolicy.Network.STANDARD) {
+            false
+        } else {
+            runCatching { RestrictedMobileDetector.detect(connectivityManager, network, requireCellular = false) }.getOrNull()
+        }
         cachedWhitelistRegime = signature to restricted
         cachedWhitelistRegimeAt = SystemClock.elapsedRealtime()
         LogManager.log(
             "Режим сети для SNI: ${
                 when (restricted) {
-                    true -> "белый список (1.1.1.1/8.8.8.8 недоступны)"
-                    false -> "обычный"
+                    true -> "ограниченная доступность TCP до проверенных адресов"
+                    false -> "доступность подтверждена системой или TCP-пробой"
                     null -> "неизвестно"
                 }
             }, сеть $signature."
