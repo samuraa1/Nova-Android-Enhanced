@@ -147,7 +147,7 @@ object VlessXrayConfig {
     private fun buildTlsSettings(config: VlessConfig): JSONObject {
         val tls = JSONObject()
             .put("serverName", config.sni.ifBlank { config.hostHeader.ifBlank { config.host } })
-            .put("allowInsecure", config.allowInsecure)
+            .put("allowInsecure", false)
         if (config.fingerprint.isNotBlank()) tls.put("fingerprint", config.fingerprint)
         if (config.alpn.isNotEmpty()) {
             tls.put("alpn", JSONArray().apply { config.alpn.forEach { put(it) } })

@@ -34,6 +34,15 @@ class VlessXrayConfigTest {
     )
 
     @Test
+    fun tlsProfilesCannotDisableCertificateVerification() {
+        val config = requireNotNull(VlessConfig.parse(links.getValue("tls-ws"))).copy(allowInsecure = true)
+        val tls = JSONObject(VlessXrayConfig.build(config, 10808))
+            .getJSONArray("outbounds").getJSONObject(0)
+            .getJSONObject("streamSettings").getJSONObject("tlsSettings")
+        assertEquals(false, tls.getBoolean("allowInsecure"))
+    }
+
+    @Test
     fun buildsRealityOutbound() {
         val config = requireNotNull(VlessConfig.parse(links.getValue("reality-vision-raw")))
         val json = JSONObject(VlessXrayConfig.build(config, socksPort = 10808))

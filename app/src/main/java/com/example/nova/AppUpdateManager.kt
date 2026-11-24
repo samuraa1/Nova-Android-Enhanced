@@ -105,14 +105,10 @@ data class ManualUpdateCheckResult(
 
 object AppUpdateManager {
 
-    private val UPDATE_URLS = listOf(
-        "https://raw.githubusercontent.com/confeden/nova_updates/main/apk_version.json",
-        "https://confeden.github.io/nova_updates/apk_version.json",
-    )
     private const val GITHUB_LATEST_RELEASE_URL =
-        "https://api.github.com/repos/confeden/Nova-Android/releases/latest"
+        "https://api.github.com/repos/samuraa1/Nova-Android-Enhanced/releases/latest"
     private const val GITHUB_LATEST_RELEASE_PAGE =
-        "https://github.com/confeden/Nova-Android/releases/latest"
+        "https://github.com/samuraa1/Nova-Android-Enhanced/releases/latest"
     private const val PERIODIC_WORK_NAME = "nova_update_check_periodic"
     private const val REPAIR_WORK_NAME = "nova_update_repair"
     private const val CHANNEL_ID = "nova_updates"
@@ -142,7 +138,7 @@ object AppUpdateManager {
     /**
      * Через сколько захваченный признак считается протухшим.
      *
-     * Честная проверка укладывается заметно быстрее: [UPDATE_URLS] и релиз на
+     * Честная проверка укладывается заметно быстрее: релизы на
      * GitHub опрашиваются по очереди с `connectTimeout` и `readTimeout` по 6 с,
      * то есть худший **правильный** случай это около полуминуты. Полторы минуты
      * оставляют запас на медленную сеть и всё равно возвращают экран к жизни.
@@ -466,7 +462,7 @@ object AppUpdateManager {
             return false
         }
         getReadyDownloadedUpdate(appContext, clientData)
-        val metadata = fetchMetadata(appContext) ?: return false
+        val metadata = fetchMetadata() ?: return false
         clientData.setLastUpdateCheckAt(System.currentTimeMillis())
         clientData.setLastUpdateVersion(metadata.version)
         clientData.setLastUpdateUrl(metadata.url)
@@ -547,7 +543,7 @@ object AppUpdateManager {
                 )
             }
 
-            val metadata = fetchMetadata(appContext)
+            val metadata = fetchMetadata()
                 ?: return ManualUpdateCheckResult(
                     kind = ManualUpdateCheckResult.Kind.FAILED,
                     message = "Не удалось проверить обновление",
@@ -978,30 +974,8 @@ object AppUpdateManager {
         }
     }
 
-    /**
-     * Самая новая версия из двух источников: ленты `apk_version.json` и тега последнего
-     * релиза.
-     *
-     * Лента обновляется ботом уже после публикации и ещё сидит в кэше CDN, поэтому в
-     * первые минуты (а то и часы) она отдаёт прежнюю версию, и человек, нажавший
-     * «Проверить обновления» сразу после выхода релиза, слышал «Установлена последняя».
-     * Тег релиза появляется в момент публикации. Раньше он спрашивался только когда
-     * лента вовсе недоступна. Контрольная сумма берётся из ленты, если её версия та
-     * же, что у тега.
-     */
-    private fun fetchMetadata(context: Context): ApkUpdateMetadata? {
-        val feed = fetchFeedMetadata()
-        val release = fetchLatestReleaseByTag()
-        if (feed == null) return release ?: fetchLatestGithubRelease()
-        if (release == null) return feed
-        return when {
-            compareVersions(release.version, feed.version) > 0 -> {
-                LogManager.log("Лента обновлений отстаёт: ${feed.version}, а релиз ${release.version}.")
-                release
-            }
-            else -> feed
-        }
-    }
+    private fun fetchMetadata(): ApkUpdateMetadata? =
+        fetchLatestGithubRelease() ?: fetchLatestReleaseByTag()
 
     /**
      * Версия последнего опубликованного релиза по редиректу `/releases/latest`.
@@ -1026,7 +1000,7 @@ object AppUpdateManager {
             if (version.isBlank() || parseVersionParts(version).isEmpty()) return null
             ApkUpdateMetadata(
                 version = version,
-                url = "https://github.com/confeden/Nova-Android/releases/download/$tag/Nova_$version.apk",
+                url = "https://github.com/samuraa1/Nova-Android-Enhanced/releases/download/$tag/Nova_$version.apk",
                 sha256 = "",
             )
         } catch (error: Exception) {
@@ -1035,44 +1009,6 @@ object AppUpdateManager {
         }
     }
 
-    private fun fetchFeedMetadata(): ApkUpdateMetadata? {
-        for (updateUrl in UPDATE_URLS) {
-            try {
-                val connection = URL(updateUrl).openConnection() as HttpURLConnection
-                connection.connectTimeout = 6000
-                connection.readTimeout = 6000
-                connection.instanceFollowRedirects = true
-                connection.useCaches = false
-                connection.setRequestProperty("User-Agent", "NovaAndroidUpdater/1.12")
-                val body = connection.inputStream.bufferedReader().use { it.readText() }
-                val json = JSONObject(body)
-                val metadata = ApkUpdateMetadata(
-                    version = json.optString("version").trim(),
-                    url = json.optString("url").trim(),
-                    sha256 = json.optString("sha256").trim(),
-                ).takeIf { it.version.isNotBlank() && it.url.isNotBlank() }
-                if (metadata != null) {
-                    LogManager.log("Метаданные обновления получены из: $updateUrl")
-                    return metadata
-                }
-            } catch (_: Exception) {
-                continue
-            }
-        }
-        return null
-    }
-
-    /**
-     * Спрашивает последний релиз публичного репозитория напрямую.
-     *
-     * Запасной путь к `apk_version.json`: репозиторий исходников публичный, и релиз
-     * появляется в нём раньше, чем кто-либо обновит ленту, — а если лента отстанет
-     * или окажется недоступна, обновление иначе не найдётся вовсе.
-     *
-     * Контрольной суммы у релиза нет, и это осознанный размен: без неё проверка
-     * скачанного APK опирается на имя пакета, версию и подпись самого Android при
-     * установке. Лента с `sha256` остаётся первой по очереди именно поэтому.
-     */
     private fun fetchLatestGithubRelease(): ApkUpdateMetadata? {
         return try {
             val connection = URL(GITHUB_LATEST_RELEASE_URL).openConnection() as HttpURLConnection

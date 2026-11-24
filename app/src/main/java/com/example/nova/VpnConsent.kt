@@ -28,7 +28,7 @@ object VpnConsent {
      */
     const val UNAVAILABLE_HINT =
         "Прошивка не показывает системное окно согласия на VPN. " +
-            "Обходной путь по ADB: appops set com.brent.nova ACTIVATE_VPN allow"
+            "Обходной путь по ADB: appops set ${BuildConfig.APPLICATION_ID} ACTIVATE_VPN allow"
 
     /**
      * Просит систему показать окно согласия.

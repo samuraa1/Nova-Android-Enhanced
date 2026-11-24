@@ -50,86 +50,10 @@ val hasReleaseKeystore = keystorePropertiesFile.exists().also { exists ->
     }
 }
 
-/**
- * Секрет для подписи рукопожатий WSS к собственным поддоменам nova-app.eu.
- *
- * Единственный источник истины — общий для клиентов и воркера файл. В репозиторий
- * секрет не попадает: он приходит из переменной окружения или из local.properties,
- * который не коммитится. Релизная сборка без секрета не собирается — тихий откат
- * на пустое значение дал бы внешне рабочую сборку, теряющую домен в тот момент,
- * когда воркер включит обязательную проверку.
- */
-val tgCfWsSecret: String = run {
-    System.getenv("NOVA_TG_CF_SECRET")?.trim()?.takeIf { it.isNotEmpty() }
-        ?: rootProject.file("local.properties")
-            .takeIf { it.exists() }
-            ?.let { file ->
-                Properties().apply { file.inputStream().use(::load) }
-                    .getProperty("novaTgCfSecret")
-                    ?.trim()
-            }
-            ?.takeIf { it.isNotEmpty() }
-        ?: ""
-}
-
-/**
- * Ключ релея этого выпуска — и он намеренно лежит в исходниках.
- *
- * Релей переносит в Швецию **только вызовы API**: регистрацию SurfEasy (Opera),
- * Proton, Cloudflare WARP и запрос мостов Moat у Tor. Сам туннель во всех
- * четырёх случаях набирается с адреса пользователя, поэтому страна выхода не
- * меняется, а на сервере разрешён единственный порт 443 и короткий список имён,
- * в который ни одна точка входа туннеля не внесена.
- *
- * Раньше он приходил из `local.properties`, и это делало сборку F-Droid
- * неполноценной: их сборщик удаляет `local.properties`, собирает из открытого
- * дерева и побайтово сверяет результат с нашим APK. Значение, которого нет в
- * исходниках, туда попасть не могло — то есть у пользователей F-Droid не
- * работала регистрация ни в Opera, ни в Proton, ни в Cloudflare.
- *
- * Тайной ключ и не был: он всегда ехал внутри выложенного APK, откуда его
- * достаёт кто угодно за минуту. Защиту даёт не он, а две вещи на сервере —
- * короткий список разрешённых имён (только API, только порт 443, ни одной точки
- * входа туннеля) и смена ключа на каждом выпуске.
- *
- * **Правило выпуска.** Каждый выпуск получает свой ключ, а релей принимает ключи
- * трёх последних выпусков **этой платформы** и не трогает чужую. Выдаётся ключ
- * командой `python deploy_opera_relay.py --rotate android <versionCode>` в
- * проекте `nova-app.eu`, и та же выдача гасит всё старше трёх последних. Оба
- * значения переносятся сюда, а конфиг заливается тем же скриптом без аргументов.
- * Клиенту со снятым ключом сервер отвечает `407` с
- * `X-Nova-Relay-Reason: outdated-client`, и приложение просит обновиться
- * (`NovaRelay.OUTDATED_MESSAGE`).
- *
- * `NOVA_OPERA_RELAY_PASSWORD` остаётся аварийной подменой — но сборка с ней
- * перестаёт быть воспроизводимой, поэтому публиковать её нельзя.
- */
-val relayKeyId: String = "nova-android-169"
-val relayKeyToken: String = ""
-
-val operaRelayPassword: String = run {
-    val override = System.getenv("NOVA_OPERA_RELAY_PASSWORD")?.trim()?.takeIf { it.isNotEmpty() }
-        ?: rootProject.file("local.properties")
-            .takeIf { it.exists() }
-            ?.let { file ->
-                Properties().apply { file.inputStream().use(::load) }
-                    .getProperty("novaOperaRelayPassword")
-                    ?.trim()
-            }
-            ?.takeIf { it.isNotEmpty() }
-    if (override != null && override != relayKeyToken) {
-        logger.warn(
-            "Nova: ключ релея подменён из окружения. Сборка перестала быть воспроизводимой — " +
-                "F-Droid соберёт из исходников другое значение и сверка APK не сойдётся. " +
-                "Для публикации уберите NOVA_OPERA_RELAY_PASSWORD / novaOperaRelayPassword."
-        )
-    }
-    override ?: relayKeyToken
-}
-
-/** Значение уезжает в строковый литерал Kotlin, поэтому кавычки и слеши экранируем. */
-fun String.asBuildConfigString(): String =
-    "\"" + replace("\\", "\\\\").replace("\"", "\\\"") + "\""
+// Public Enhanced builds use provider APIs without the upstream author's private relay.
+val tgCfWsSecret = ""
+val relayKeyId = ""
+val operaRelayPassword = ""
 
 android {
     namespace = "com.example.nova"
@@ -145,7 +69,7 @@ android {
     }
 
     defaultConfig {
-        applicationId = "com.brent.nova"
+        applicationId = "com.brent.nova.enhanced"
         minSdk = 24 // Android 7.0; более новые API вызываются под проверкой SDK_INT
         targetSdk = 34
         buildConfigField("boolean", "DIAGNOSTICS", novaDiagnostics.toString())
@@ -153,20 +77,8 @@ android {
         // Главный экран выключается только в диагностической сборке — чтобы в
         // лаунчере остался один значок и человек не открыл падающий экран.
         manifestPlaceholders["novaMainEnabled"] = (!novaDiagnostics).toString()
-        // Числа стоят литералами намеренно: F-Droid читает версию из этого файла
-        // регулярным выражением (`fdroid checkupdates`, режим `Tags`) и переменную
-        // не раскрывает — со `versionCode = appVersionCode` он не находит версию
-        // вовсе и не видит новых релизов. Единственный источник версии — здесь.
-        // Номер версии может подняться заранее, а ключ релея выдаётся только в день
-        // выпуска, и это не забывчивость. Логин релея несёт номер версии (D17), ключ
-        // на новый номер выдаёт сервер, и та же выдача гасит самый старый из трёх
-        // принятых ключей: выданный заранее, он отрезал бы людей на старой версии
-        // раньше, чем вышло обновление. Пока номер впереди ключа, release-APK не
-        // упаковывается (проверка ниже), а быстрая и диагностическая сборки идут с
-        // прежним ключом, который сервер принимает. Провернуть ключ в обход сервера —
-        // получить `407` у всех пользователей.
-        versionCode = 169
-        versionName = "1.35.2"
+        versionCode = 170
+        versionName = "1.36.0"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
 
@@ -269,15 +181,15 @@ android {
                 signingConfig = signingConfigs.getByName("release")
             }
             buildConfigField("String", "TG_CF_WS_SECRET", "\"$tgCfWsSecret\"")
-            buildConfigField("String", "OPERA_RELAY_PASSWORD", operaRelayPassword.asBuildConfigString())
-            buildConfigField("String", "RELAY_KEY_ID", relayKeyId.asBuildConfigString())
+            buildConfigField("String", "OPERA_RELAY_PASSWORD", "\"" + operaRelayPassword + "\"")
+            buildConfigField("String", "RELAY_KEY_ID", "\"" + relayKeyId + "\"")
         }
         debug {
             // Для отладочных сборок пустой секрет допустим: подпись просто не
             // добавляется, и клиент работает по публичным доменам Cloudflare.
             buildConfigField("String", "TG_CF_WS_SECRET", "\"$tgCfWsSecret\"")
-            buildConfigField("String", "OPERA_RELAY_PASSWORD", operaRelayPassword.asBuildConfigString())
-            buildConfigField("String", "RELAY_KEY_ID", relayKeyId.asBuildConfigString())
+            buildConfigField("String", "OPERA_RELAY_PASSWORD", "\"" + operaRelayPassword + "\"")
+            buildConfigField("String", "RELAY_KEY_ID", "\"" + relayKeyId + "\"")
         }
     }
 
@@ -314,167 +226,6 @@ android {
                 "org/bouncycastle/pqc/crypto/picnic/lowmcL5.bin.properties",
                 "org/bouncycastle/x509/CertPathReviewerMessages_de.properties",
             )
-        }
-    }
-}
-
-// Сборка со стороны: у постороннего секрета нет и быть не может, и запрет релиза
-// превращал бы «соберите сами и проверьте» в «соберите только debug». Флаг ставится
-// осознанно и ровно один раз — мы его не ставим никогда, так что защита от забытого
-// секрета у нас остаётся прежней.
-val allowUnsignedRelease: Boolean =
-    System.getenv("NOVA_ALLOW_UNSIGNED_RELEASE") == "1" ||
-        // Свойство Gradle нужно сборщикам, которые не управляют окружением и не
-        // правят local.properties: F-Droid передаёт флаги только через
-        // `gradleprops`, то есть как -PnovaAllowUnsignedRelease=true.
-        providers.gradleProperty("novaAllowUnsignedRelease").orNull
-            ?.trim().equals("true", ignoreCase = true) ||
-        rootProject.file("local.properties")
-            .takeIf { it.exists() }
-            ?.let { file ->
-                Properties().apply { file.inputStream().use(::load) }
-                    .getProperty("novaAllowUnsignedRelease")
-                    ?.trim()
-                    .equals("true", ignoreCase = true)
-            } == true
-
-// Релиз без секрета собираться не должен: такая сборка выглядит работоспособной,
-// но потеряет доступ к nova-app.eu, как только воркер включит обязательную проверку.
-// Проверка выполняется на этапе конфигурации, а не в doFirst: замыкание задачи
-// утащило бы в кэш конфигурации ссылку на объект скрипта сборки, а такие ссылки
-// Gradle сериализовать не умеет.
-if (
-    tgCfWsSecret.isEmpty() &&
-    !allowUnsignedRelease &&
-    gradle.startParameter.taskNames.any { it.contains("Release", ignoreCase = true) }
-) {
-    throw GradleException(
-        "Не задан секрет подписи WSS. Укажите переменную окружения NOVA_TG_CF_SECRET " +
-            "или novaTgCfSecret в local.properties. Значение берётся из общего файла " +
-            "tgrelay/cf_ws.key проекта Nova PC и в репозиторий не коммитится.\n" +
-            "  Собираете Nova из исходников не как владелец домена nova-app.eu? " +
-            "Задайте NOVA_ALLOW_UNSIGNED_RELEASE=1 — соберётся всё, кроме релея Telegram " +
-            "через собственные поддомены."
-    )
-}
-
-if (tgCfWsSecret.isEmpty() && allowUnsignedRelease) {
-    logger.warn(
-        "Nova: релиз собирается без секрета подписи WSS. Транспорты работают, " +
-            "релей Telegram через nova-app.eu — нет."
-    )
-}
-
-// Пустой секрет ломает сборку, но устаревший — нет, а вреда от него столько же:
-// APK выглядит рабочим и теряет nova-app.eu ровно тогда, когда воркер включает
-// обязательную проверку. Ровно это и случилось при смене секрета — ПК обновили,
-// Android остался на прежнем.
-//
-// Поэтому: если рядом лежит Nova PC, сверяемся с её общим файлом. Проверка
-// намеренно мягкая — при другой раскладке каталогов файла просто не будет, и
-// сборка продолжится, — но при найденном расхождении релиз не собирается.
-// Обойти осознанно: NOVA_SKIP_CF_SECRET_PARITY=1.
-//
-// Читается на этапе конфигурации, как и проверка выше, и по той же причине.
-if (
-    tgCfWsSecret.isNotEmpty() &&
-    System.getenv("NOVA_SKIP_CF_SECRET_PARITY") != "1" &&
-    gradle.startParameter.taskNames.any { it.contains("Release", ignoreCase = true) }
-) {
-    val shared = rootProject.file("../Nova PC/tgrelay/cf_ws.key")
-    if (shared.exists()) {
-        val expected = shared.readText().trim()
-        if (expected.isNotEmpty() && expected != tgCfWsSecret) {
-            throw GradleException(
-                "Секрет подписи WSS не совпадает с ${shared.path}.\n" +
-                    "  Android подписывался бы отозванным секретом и потерял бы nova-app.eu.\n" +
-                    "  Приведите novaTgCfSecret в local.properties к значению из общего файла.\n" +
-                    "  Осознанно пропустить: NOVA_SKIP_CF_SECRET_PARITY=1"
-            )
-        }
-    }
-}
-
-// Ключ выпуска теперь литерал, так что пустым он бывает только если его стёрли
-// намеренно. Сборку не роняем — предупреждаем: без ключа регистрация Opera,
-// Proton и Cloudflare остаётся только на прямых путях, а из России они закрыты.
-if (operaRelayPassword.isEmpty() || relayKeyId.isEmpty()) {
-    logger.warn(
-        "Nova: ключ релея пуст. Регистрация Opera, Proton и Cloudflare пойдёт только " +
-            "напрямую, а из России эти хосты закрыты. Выдать новый ключ: " +
-            "python deploy_opera_relay.py --rotate android <versionCode> в проекте nova-app.eu."
-    )
-}
-
-// Логин обязан нести версию: сервер по нему решает, погашен ключ или нет, и
-// именно поэтому отвечает «обновите приложение», а не «неверный пароль».
-// Проверяем здесь, потому что опечатка в литерале иначе всплывёт только на
-// устройстве, где ответ 407 неотличим от сетевого отказа.
-if (!Regex("^nova-[a-z0-9]+-.+$").matches(relayKeyId)) {
-    throw GradleException(
-        "Логин релея должен иметь вид nova-<платформа>-<версия>, а сейчас это «$relayKeyId».\n" +
-            "  Сервер не разберёт его и ответит обычным 407 вместо «обновите приложение»."
-    )
-}
-
-/**
- * Сборка, которую можно выложить.
- *
- * Быстрая и диагностическая существуют ровно затем, чтобы проверять код: у
- * первой выключены R8 и lint, у второй подменён главный экран. Ни ту, ни другую
- * не публикуют, и требовать от них выпускной дисциплины незачем.
- */
-val novaPublishableBuild = !novaFastBuild && !novaDiagnostics
-
-/**
- * Два условия публикации, которые нельзя проверить глазами.
- *
- * Первое — воспроизводимость. Предупреждения здесь мало: оно тонет в выводе
- * Gradle, а цена ошибки — выпуск, который F-Droid не примет. Их сборщик удаляет
- * `local.properties`, собирает из открытого дерева и сверяет APK побайтово; с
- * подменённым ключом `classes.dex` расходится гарантированно, и версия просто
- * не появляется в каталоге. Замечено ровно так: `local.properties` этой машины
- * несёт ключ, отличный от литерала в исходниках.
- *
- * Второе — правило D17: каждый выпуск получает свой ключ релея, а логин несёт
- * `versionCode`. Расхождение значит, что ключ не выдавали, и на устройстве оно
- * проявится как `407` от сервера — неотличимо от сетевого отказа.
- *
- * Осознанный обход есть, потому что запрет без выхода люди снимают правкой
- * самой проверки.
- */
-// Проверка висит на самой упаковке release-APK, а не на конфигурации проекта.
-// Иначе она роняла бы и `testGithubDebugUnitTest`, и любой другой вызов Gradle:
-// повод для отказа — выложить нечего, а не «нельзя ничего делать».
-if (novaPublishableBuild) {
-    val relayKeyVersion = relayKeyId.substringAfterLast('-')
-    val buildVersionCode = android.defaultConfig.versionCode?.toString().orEmpty()
-    val relayOverridden = operaRelayPassword != relayKeyToken
-    val keyIdForMessage = relayKeyId
-    tasks.matching { it.name.startsWith("package") && it.name.endsWith("Release") }.configureEach {
-        doFirst {
-            if (System.getenv("NOVA_ALLOW_UNPUBLISHABLE_BUILD") == "1") return@doFirst
-            if (relayOverridden) {
-                throw GradleException(
-                    "Ключ релея подменён из окружения или local.properties — публиковать эту сборку нельзя.\n" +
-                        "  F-Droid соберёт из открытого дерева значение из исходников, и побайтовая сверка\n" +
-                        "  не сойдётся: выпуск не попадёт в каталог.\n" +
-                        "  Уберите novaOperaRelayPassword / NOVA_OPERA_RELAY_PASSWORD, либо собирайте с\n" +
-                        "  -PnovaFastBuild, либо осознанно: NOVA_ALLOW_UNPUBLISHABLE_BUILD=1"
-                )
-            }
-            if (relayKeyVersion != buildVersionCode) {
-                throw GradleException(
-                    "Логин релея «$keyIdForMessage» выписан на версию $relayKeyVersion, а собирается $buildVersionCode.\n" +
-                        "  По правилу выпуска (D17) ключ выдаётся на каждый выпуск, и выдаёт его сервер:\n" +
-                        "    python deploy_opera_relay.py --rotate android $buildVersionCode  (проект nova-app.eu)\n" +
-                        "  После этого перенесите сюда оба значения — relayKeyId и relayKeyToken.\n" +
-                        "  Но только в день выпуска: выдача гасит самый старый из трёх принятых ключей,\n" +
-                        "  и люди на той версии теряют регистрацию раньше, чем выйдет обновление.\n" +
-                        "  До выпуска собирайте с -PnovaFastBuild.\n" +
-                        "  Осознанно пропустить: NOVA_ALLOW_UNPUBLISHABLE_BUILD=1"
-                )
-            }
         }
     }
 }
