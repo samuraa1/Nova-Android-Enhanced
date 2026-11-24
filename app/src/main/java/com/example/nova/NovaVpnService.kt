@@ -6716,15 +6716,8 @@ class NovaVpnService : OperaNativeVpnService() {
             val operaTargets = getOperaFallbackSequence(regionPreference)
             val connectivityManager = getSystemService(android.net.ConnectivityManager::class.java)
             val selectedUnderlyingNetwork = selectUnderlyingNetwork(connectivityManager)
-            val telegramTransparentProfile = resolveTelegramTransparentProfile(
-                clientData = clientData,
-                connectivityManager = connectivityManager,
-                selectedUnderlyingNetwork = selectedUnderlyingNetwork,
-            )
-            setTelegramTransparentProxyConfigCompat(
-                enabled = telegramTransparentProfile != "off",
-                profile = telegramTransparentProfile,
-            )
+            // The bundled nova-core predates certificate verification for this relay.
+            setTelegramTransparentProxyConfigCompat(enabled = false, profile = "off")
             // Tor — раньше VLESS и раньше всей цепочки WARP.
             //
             // Ветка стоит именно здесь, а не только в `startSmartConnection`:
@@ -6815,20 +6808,6 @@ class NovaVpnService : OperaNativeVpnService() {
                     "${describeNetwork(connectivityManager, selectedUnderlyingNetwork) ?: "none"}, " +
                     "metered=$underlyingNetworkMetered"
             )
-            if (telegramTransparentProfile != "off") {
-                LogManager.log(
-                    "Transparent Telegram relay: профиль=$telegramTransparentProfile, " +
-                        "Telegram/Nagram/AyuGram трафик пойдёт через встроенный WS/WSS transport."
-                )
-            } else {
-                // Молчащий «выключен» уже стоил одного прогона: журнал был пуст, и
-                // отличить «релей не понадобился» от «правка не подействовала»
-                // оказалось нечем. Причина отказа обязана быть в журнале.
-                LogManager.log(
-                    "Transparent Telegram relay выключен: " +
-                        clientData.describeMessengerWarpProfilesRefusal() + "."
-                )
-            }
             if (preferMessengerChatProfiles) {
                 LogManager.log(
                     "Messenger acceleration: профиль=${messengerAccelerationProfile.name.lowercase(Locale.US)}, " +
@@ -25214,23 +25193,6 @@ class NovaVpnService : OperaNativeVpnService() {
         return when {
             "cell" in networkClass && "wifi" !in networkClass -> MessengerAccelerationProfile.MOBILE
             else -> MessengerAccelerationProfile.WIFI
-        }
-    }
-
-    private fun resolveTelegramTransparentProfile(
-        clientData: ClientData,
-        connectivityManager: android.net.ConnectivityManager?,
-        selectedUnderlyingNetwork: android.net.Network?,
-    ): String {
-        if (!clientData.shouldPreferMessengerWarpProfiles()) {
-            return "off"
-        }
-        val networkClass = buildUnderlyingNetworkClass(connectivityManager, selectedUnderlyingNetwork)
-            .orEmpty()
-            .lowercase(Locale.US)
-        return when {
-            "cell" in networkClass && "wifi" !in networkClass -> "mobile"
-            else -> "wifi"
         }
     }
 

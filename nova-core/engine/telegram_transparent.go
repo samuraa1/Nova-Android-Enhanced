@@ -1353,11 +1353,7 @@ func normalizeTransparentWSTimeout(timeout time.Duration) time.Duration {
 	return timeout
 }
 
-// dialTransparentTLSEndpoint поднимает TLS к endpoint'у и сообщает, ушло ли в
-// SNI подставленное имя: от этого зависит, кого винить в последующем отказе.
-//
-// Маршрут едет в заголовке Host, который пишет upgradeTransparentWebSocket, —
-// имя домена здесь нужно только как ключ подстановки. См. cfws.NeutralSNI.
+// dialTransparentTLSEndpoint authenticates the relay by the same name as the WebSocket Host.
 func dialTransparentTLSEndpoint(ip string, domain string, timeout time.Duration) (*utls.UConn, bool, error) {
 	rawConn, err := protectedDialer(timeout).Dial("tcp", net.JoinHostPort(ip, "443"))
 	if err != nil {
@@ -1365,16 +1361,14 @@ func dialTransparentTLSEndpoint(ip string, domain string, timeout time.Duration)
 	}
 	setTcpNoDelay(rawConn)
 
-	sni, neutralSNIUsed := cfws.NeutralSNI(domain)
+	sni := domain
+	const neutralSNIUsed = false
 	profile := tlsshape.Current()
 	// Кэш сессий не заводим намеренно: возобновление добавляет к hello
 	// расширение PSK, то есть меняет ту самую форму, которую мы здесь задаём, а
 	// выигрыш почти нулевой — пул держит WebSocket открытыми, и новые
 	// рукопожатия случаются редко.
-	config := &utls.Config{
-		InsecureSkipVerify: true,
-		ServerName:         sni,
-	}
+	config := &utls.Config{ServerName: sni}
 	tlsConn, err := newTransparentUTLSClient(rawConn, config, profile)
 	if err != nil {
 		_ = rawConn.Close()
